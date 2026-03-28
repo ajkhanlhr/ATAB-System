@@ -25,7 +25,7 @@ st.markdown("""
 api_key = st.secrets.get("GEMINI_API_KEY", "")
 genai.configure(api_key=api_key)
 
-# 2. DATABASE INIT
+# 2. DATABASE INIT (With Self-Healing Schema Updates)
 def init_db():
     conn = sqlite3.connect('atab_memory.db', check_same_thread=False)
     c = conn.cursor()
@@ -40,6 +40,13 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS metadata (category TEXT, value TEXT, UNIQUE(category, value))''')
     # Rubrics
     c.execute('''CREATE TABLE IF NOT EXISTS rubrics (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, description TEXT)''')
+    
+    # --- SELF-HEALING: Add 'type' column if it's missing from old DBs ---
+    try:
+        c.execute("ALTER TABLE evaluations ADD COLUMN type TEXT")
+    except sqlite3.OperationalError:
+        pass # Column already exists
+        
     conn.commit()
     conn.close()
 
@@ -73,11 +80,10 @@ def extract_text(uploaded_file):
 # 4. MAIN APP
 def main():
     init_db()
-    # Initialize Knowledge Base if not present
     if 'kb_files' not in st.session_state: st.session_state['kb_files'] = {}
 
     st.sidebar.title("🎓 ATAB System")
-    app_mode = st.sidebar.selectbox("Access Mode", ["Instructor View", "Student View"])
+    app_mode = st.sidebar.selectbox("Access Mode", ["Student View", "Instructor View"])
     
     # --- DYNAMIC SIDEBAR FILTERS ---
     s_list = get_meta('session') + ["Add New"]
@@ -103,7 +109,6 @@ def main():
             col1, col2 = st.columns(2)
             with col1:
                 st.subheader("Student Archive Upload")
-                st.write("Upload CSV to append/update students.")
                 csv_file = st.file_uploader("Upload Student List (CSV)", type=["csv"], key="csv_uploader")
                 if csv_file:
                     df_s = pd.read_csv(csv_file)
@@ -113,12 +118,11 @@ def main():
 
                     if 'roll_no' in df_s.columns and 'name' in df_s.columns:
                         conn = sqlite3.connect('atab_memory.db')
-                        # "INSERT OR REPLACE" ensures we don't duplicate, just update
                         for _, r in df_s.iterrows():
                             conn.execute("INSERT OR REPLACE INTO students VALUES (?,?,?,?)", 
                                          (str(r['roll_no']), r['name'], sel_session, sel_course))
                         conn.commit(); conn.close()
-                        st.success(f"Archive Updated: {len(df_s)} students added/verified.")
+                        st.success(f"Archive Updated: {len(df_s)} students archived.")
                     else:
                         st.error("CSV must contain 'Roll No' and 'Name' columns.")
             
@@ -137,12 +141,11 @@ def main():
                 conn = sqlite3.connect('atab_memory.db')
                 conn.execute("INSERT INTO rubrics (name, description) VALUES (?,?)", (new_r_name, new_r_desc))
                 conn.commit(); conn.close()
-                st.success("Custom Rubric saved to ATAB Brain.")
+                st.success("Custom Rubric saved.")
 
         with tabs[2]:
             st.subheader("Analytics (Class Performance)")
             conn = sqlite3.connect('atab_memory.db')
-            # Fetch data with Names for analytics
             query = """
             SELECT e.roll_no, s.name, e.attribute, e.score 
             FROM evaluations e 
@@ -160,15 +163,15 @@ def main():
                 fig, ax = plt.subplots(figsize=(10, 4))
                 sns.heatmap(df_ev.pivot_table(index='name', columns='attribute', values='score'), annot=True, cmap="RdYlGn", ax=ax)
                 st.pyplot(fig)
-            else: st.info("No interactive history found for this class yet.")
+            else: st.info("Conduct evaluations to see analytics.")
             conn.close()
 
         with tabs[3]:
             st.subheader("Complete Evaluation History (Ledger)")
             conn = sqlite3.connect('atab_memory.db')
-            # JOIN to show student name in history
+            # Updated query to handle potentially empty 'type' column
             hist_query = """
-            SELECT e.roll_no, s.name, e.type, e.attribute, e.score, e.feedback, e.timestamp 
+            SELECT e.roll_no, s.name, e.attribute, e.score, e.feedback, e.timestamp 
             FROM evaluations e 
             LEFT JOIN students s ON e.roll_no = s.roll_no 
             WHERE e.session=? AND e.course=?
@@ -176,7 +179,7 @@ def main():
             hist = pd.read_sql_query(hist_query, conn, params=(sel_session, sel_course))
             st.dataframe(hist, use_container_width=True)
             if not hist.empty:
-                st.download_button("Export Academic Ledger (CSV)", hist.to_csv(index=False).encode('utf-8'), "Full_Ledger.csv", "text/csv")
+                st.download_button("Export Ledger (CSV)", hist.to_csv(index=False).encode('utf-8'), "Full_Ledger.csv", "text/csv")
             conn.close()
 
     # --- STUDENT VIEW ---
@@ -190,24 +193,17 @@ def main():
             
             if student_info:
                 st.subheader(f"Welcome back, {student_info[0]}")
-                if st.button("Generate Exam (3 MCQs, 2 Short, 1 Essay)"):
+                if st.button("Generate Exam"):
                     if st.session_state['kb_files']:
-                        with st.spinner("Preparing your custom exam..."):
+                        with st.spinner("Preparing exam..."):
                             full_ctx = "\n\n".join(st.session_state['kb_files'].values())
                             model = genai.GenerativeModel('gemini-1.5-flash')
                             prompt = f"Using Context: {full_ctx[:15000]}\nGenerate 3 MCQs, 2 Short Questions, and 1 Essay Question."
                             resp = model.generate_content(prompt)
                             st.markdown(resp.text)
-                    else: st.error("Instructor has not uploaded materials for this course.")
-                
-                st.markdown("---")
-                st.subheader("My Growth History")
-                conn = sqlite3.connect('atab_memory.db')
-                my_h = pd.read_sql_query("SELECT attribute, score, feedback, timestamp FROM evaluations WHERE roll_no=?", conn, params=(s_roll,))
-                st.table(my_h)
-                conn.close()
+                    else: st.error("No course materials uploaded yet.")
             else:
-                st.warning("Roll number not found in Archive. Please ask your Instructor to add you.")
+                st.warning("Roll number not found. Ask Instructor to add you to the Archive.")
 
 if __name__ == "__main__":
     main()
