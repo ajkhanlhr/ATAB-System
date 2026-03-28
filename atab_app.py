@@ -7,25 +7,16 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-# --- 1. STYLISH ICON & MOBILE APP BEHAVIOR ---
+# --- UI CONFIG ---
 st.set_page_config(page_title="ATAB System", page_icon="🎓", layout="wide")
 
-# This hides the 'made with streamlit' footer and adds professional styling
-hide_style = """
-    <style>
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
-    </style>
-    """
-st.markdown(hide_style, unsafe_allow_html=True)
+# 1. BRAIN CONFIG
+api_key = st.secrets.get("GEMINI_API_KEY", "")
+genai.configure(api_key=api_key)
 
-# 2. BRAIN CONFIGURATION
-genai.configure(api_key="YOUR_ACTUAL_API_KEY_HERE")
-
-# 3. DATABASE INITIALIZATION
+# 2. DATABASE INIT
 def init_db():
-    conn = sqlite3.connect('atab_memory.db')
+    conn = sqlite3.connect('atab_memory.db', check_same_thread=False)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS students (roll_no TEXT PRIMARY KEY, name TEXT, session TEXT, course TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS evaluations (roll_no TEXT, session TEXT, course TEXT, attribute TEXT, score INTEGER, feedback TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
@@ -33,81 +24,77 @@ def init_db():
     conn.commit()
     conn.close()
 
-def get_metadata(category):
+def get_meta(cat):
     conn = sqlite3.connect('atab_memory.db')
-    df = pd.read_sql_query("SELECT value FROM metadata WHERE category=?", conn, params=(category,))
+    df = pd.read_sql_query("SELECT value FROM metadata WHERE category=?", conn, params=(cat,))
     conn.close()
     return df['value'].tolist()
 
-def add_metadata(category, value):
+def add_meta(cat, val):
     conn = sqlite3.connect('atab_memory.db')
     try:
-        conn.execute("INSERT INTO metadata (category, value) VALUES (?, ?)", (category, value))
+        conn.execute("INSERT INTO metadata (category, value) VALUES (?, ?)", (cat, val))
         conn.commit()
     except: pass
     conn.close()
 
-# 4. MAIN APP
+# 3. MAIN APP
 def main():
     init_db()
     if 'kb_files' not in st.session_state: st.session_state['kb_files'] = {}
 
-    st.sidebar.title("ATAB Control")
-    app_mode = st.sidebar.selectbox("Select Mode", ["Student View", "Instructor View"])
+    st.sidebar.title("🎓 ATAB System")
+    app_mode = st.sidebar.selectbox("Access Mode", ["Instructor View", "Student View"])
     
-    # Dynamic Dropdowns
-    sessions = get_metadata('session') + ["Add New"]
-    sel_session = st.sidebar.selectbox("Session", sessions)
+    # Session/Course Logic
+    s_list = get_meta('session') + ["Add New"]
+    sel_session = st.sidebar.selectbox("Academic Session", s_list)
     if sel_session == "Add New":
         ns = st.sidebar.text_input("New Session Name")
-        if st.sidebar.button("Add Session"):
-            add_metadata('session', ns)
-            st.rerun()
+        if st.sidebar.button("Register Session"):
+            add_meta('session', ns); st.rerun()
 
-    courses = get_metadata('course') + ["Add New"]
-    sel_course = st.sidebar.selectbox("Course", courses)
+    c_list = get_meta('course') + ["Add New"]
+    sel_course = st.sidebar.selectbox("Course Code", c_list)
     if sel_course == "Add New":
         nc = st.sidebar.text_input("New Course Code")
-        if st.sidebar.button("Add Course"):
-            add_metadata('course', nc)
-            st.rerun()
+        if st.sidebar.button("Register Course"):
+            add_meta('course', nc); st.rerun()
 
     if app_mode == "Instructor View":
         st.title(f"👨‍🏫 Instructor: {sel_course}")
-        t1, t2, t3 = st.tabs(["Archives", "Analytics", "History"])
+        t1, t2 = st.tabs(["Archives", "Analytics"])
         
         with t1:
-            st.subheader("Knowledge & Student Archive")
-            up = st.file_uploader("Upload Knowledge", accept_multiple_files=True)
-            if up:
-                for f in up: st.session_state['kb_files'][f.name] = "Content Processed" # Simplified for UI
+            st.subheader("Student Archive Upload")
+            csv_file = st.file_uploader("Upload CSV (Required columns: Roll No and Name)", type=["csv"])
             
-            st.markdown("---")
-            st.write("Batch Student Upload (CSV)")
-            csv_up = st.file_uploader("Upload CSV (roll_no, name)")
-            if csv_up:
-                df_s = pd.read_csv(csv_up)
-                conn = sqlite3.connect('atab_memory.db')
-                for _, r in df_s.iterrows():
-                    conn.execute("INSERT OR REPLACE INTO students VALUES (?,?,?,?)", (str(r['roll_no']), r['name'], sel_session, sel_course))
-                conn.commit(); conn.close()
-                st.success("Students Archived.")
+            if csv_file:
+                df_s = pd.read_csv(csv_file)
+                # --- FLEXIBLE HEADER CLEANER ---
+                # This fixes the KeyError by making everything lowercase and removing spaces
+                df_s.columns = df_s.columns.str.strip().str.lower().str.replace(' ', '_')
+                
+                # Mapping common variations
+                col_map = {
+                    'roll_number': 'roll_no', 'rollno': 'roll_no', 'id': 'roll_no',
+                    'student_name': 'name', 'full_name': 'name'
+                }
+                df_s = df_s.rename(columns=col_map)
 
-        with t2:
-            st.subheader("Performance Heatmap")
-            conn = sqlite3.connect('atab_memory.db')
-            df_ev = pd.read_sql_query("SELECT * FROM evaluations WHERE course=?", conn, params=(sel_course,))
-            if not df_ev.empty:
-                # Top 5 / Bottom 5 logic here...
-                st.dataframe(df_ev)
-            conn.close()
+                if 'roll_no' in df_s.columns and 'name' in df_s.columns:
+                    conn = sqlite3.connect('atab_memory.db')
+                    for _, r in df_s.iterrows():
+                        conn.execute("INSERT OR REPLACE INTO students VALUES (?,?,?,?)", 
+                                     (str(r['roll_no']), r['name'], sel_session, sel_course))
+                    conn.commit(); conn.close()
+                    st.success(f"Archived {len(df_s)} students successfully!")
+                else:
+                    st.error(f"Missing columns! Found: {list(df_s.columns)}. Please ensure your CSV has 'Roll No' and 'Name'.")
 
     else:
         st.title("🎓 Student Portal")
-        roll = st.text_input("Enter Roll Number")
-        if st.button("Generate Exam"):
-            st.write("Generating your 3-part exam (MCQs, Short, Essay)...")
-            # AI Exam Gen Logic...
+        st.write("Login with your Roll Number to begin.")
 
 if __name__ == "__main__":
     main()
