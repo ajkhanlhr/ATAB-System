@@ -9,24 +9,25 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 
 # --- UI CONFIG ---
-st.set_page_config(page_title="ATAB System Pro", page_icon="🎓", layout="wide")
+st.set_page_config(page_title="ATAB Pro", page_icon="🎓", layout="wide")
 
 # 1. BRAIN CONFIG
 api_key = st.secrets.get("GEMINI_API_KEY", "")
 genai.configure(api_key=api_key)
 
-# 2. DATABASE INIT
+# 2. DATABASE INIT (Simplified for Stability)
 def init_db():
     conn = sqlite3.connect('atab_memory.db', check_same_thread=False)
     c = conn.cursor()
+    # Unique constraint on Roll+Course+Session prevents duplicates and "shuffling"
     c.execute('''CREATE TABLE IF NOT EXISTS students 
-                 (roll_no TEXT, name TEXT, session TEXT, course TEXT, PRIMARY KEY(roll_no, course, session))''')
+                 (roll_no TEXT, name TEXT, session TEXT, course TEXT, 
+                  PRIMARY KEY(roll_no, course, session))''')
     c.execute('''CREATE TABLE IF NOT EXISTS evaluations 
-                 (roll_no TEXT, session TEXT, course TEXT, type TEXT, attribute TEXT, 
+                 (roll_no TEXT, session TEXT, course TEXT, attribute TEXT, 
                   score INTEGER, feedback TEXT, timestamp DATETIME)''')
     c.execute('''CREATE TABLE IF NOT EXISTS metadata (category TEXT, value TEXT, UNIQUE(category, value))''')
-    c.execute('''CREATE TABLE IF NOT EXISTS rubrics 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, description TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS rubrics (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, description TEXT)''')
     conn.commit()
     conn.close()
 
@@ -59,16 +60,16 @@ def extract_text(uploaded_file):
 # 4. MAIN APP
 def main():
     init_db()
-    if 'kb_files' not in st.session_state:
-        st.session_state['kb_files'] = {}
+    if 'kb_files' not in st.session_state: st.session_state['kb_files'] = {}
 
-    st.sidebar.title("🎓 ATAB Control")
+    st.sidebar.title("🎓 ATAB System")
     app_mode = st.sidebar.selectbox("Access Mode", ["Instructor View", "Student View"])
     
+    # Global Filters
     s_list = get_meta('session') + ["Add New"]
     sel_session = st.sidebar.selectbox("Academic Session", s_list)
     if sel_session == "Add New":
-        ns = st.sidebar.text_input("New Session (e.g. SP2026)")
+        ns = st.sidebar.text_input("New Session Name")
         if st.sidebar.button("Register Session"):
             if ns: add_meta('session', ns); st.rerun()
 
@@ -79,165 +80,112 @@ def main():
         if st.sidebar.button("Register Course"):
             if nc: add_meta('course', nc); st.rerun()
 
+    # --- INSTRUCTOR VIEW ---
     if app_mode == "Instructor View":
         st.title(f"👨‍🏫 Instructor: {sel_course} ({sel_session})")
-        
-        # ADDED "Edit / Delete" TAB
-        tabs = st.tabs(["Archives & Knowledge", "Edit & Clean Archive", "Rubric Upgrades", "Class Analytics", "Evaluation History"])
+        tabs = st.tabs(["Archives & Knowledge", "Manage Student Lists", "Rubrics", "Analytics & Ledger"])
 
-        # TAB 1: ARCHIVES
         with tabs[0]:
             col1, col2 = st.columns(2)
             with col1:
-                st.subheader("Student Info Archive")
-                csv_file = st.file_uploader("Upload Student List (CSV)", type=["csv"], key="csv_up")
+                st.subheader("Upload Student CSV")
+                csv_file = st.file_uploader("Upload List (Roll No, Name)", type=["csv"], key="csv")
                 if csv_file:
-                    df_s = pd.read_csv(csv_file)
-                    df_s.columns = df_s.columns.str.strip().str.lower().str.replace(' ', '_')
-                    df_s = df_s.rename(columns={'roll_number': 'roll_no', 'id': 'roll_no', 'student_name': 'name', 'full_name': 'name'})
-                    if 'roll_no' in df_s.columns and 'name' in df_s.columns:
+                    df = pd.read_csv(csv_file)
+                    df.columns = df.columns.str.strip().str.lower().str.replace(' ', '_')
+                    # Standardize headers
+                    df = df.rename(columns={'roll_number': 'roll_no', 'id': 'roll_no', 'student_name': 'name', 'full_name': 'name'})
+                    if 'roll_no' in df.columns and 'name' in df.columns:
                         conn = sqlite3.connect('atab_memory.db')
-                        for _, r in df_s.iterrows():
+                        for _, r in df.iterrows():
                             conn.execute("INSERT OR REPLACE INTO students VALUES (?,?,?,?)", 
                                          (str(r['roll_no']), r['name'], sel_session, sel_course))
                         conn.commit(); conn.close()
-                        st.success(f"Archived {len(df_s)} students.")
-                
-                # NEW: LIST OF CLASSES ALREADY UPLOADED
-                st.markdown("---")
-                st.write("**📂 Existing Class Lists in Archive:**")
-                conn = sqlite3.connect('atab_memory.db')
-                existing_classes = pd.read_sql_query("SELECT DISTINCT session, course FROM students", conn)
-                if not existing_classes.empty:
-                    for idx, row in existing_classes.iterrows():
-                        st.info(f"Class: {row['course']} | Session: {row['session']}")
-                else: st.write("No lists uploaded yet.")
-                conn.close()
-            
+                        st.success("List Imported Successfully.")
             with col2:
-                st.subheader("Knowledge Archive")
-                kb = st.file_uploader("Add to Knowledge Base", accept_multiple_files=True, key="kb_up")
+                st.subheader("Knowledge Ingestion")
+                kb = st.file_uploader("Upload Documents", accept_multiple_files=True)
                 if kb:
                     for f in kb: st.session_state['kb_files'][f.name] = extract_text(f)
                     st.success("Knowledge Base Updated.")
-                
-                with st.expander("View Active Knowledge Assets"):
-                    for fname in st.session_state['kb_files'].keys():
-                        st.write(f"✅ {fname}")
 
-        # NEW TAB 2: EDIT & CLEAN ARCHIVE
         with tabs[1]:
-            st.subheader("Manage & Clean Student Records")
+            st.subheader("Clean & Verify Archive")
             conn = sqlite3.connect('atab_memory.db')
-            current_archive = pd.read_sql_query("SELECT * FROM students WHERE session=? AND course=?", conn, params=(sel_session, sel_course))
+            # Only show students for the ACTIVE selection
+            current_list = pd.read_sql_query("SELECT roll_no, name FROM students WHERE session=? AND course=?", conn, params=(sel_session, sel_course))
+            st.write(f"**Current active list for {sel_course}: {len(current_list)} students.**")
+            st.dataframe(current_list, use_container_width=True)
             
-            if not current_archive.empty:
-                st.write(f"Currently viewing {len(current_archive)} students in {sel_course}.")
-                # Multi-select for deletion
-                to_delete = st.multiselect("Select Students to Remove (Roll No - Name)", 
-                                           options=[f"{r} - {n}" for r, n in zip(current_archive['roll_no'], current_archive['name'])])
-                
-                if st.button("🗑️ Delete Selected from Archive"):
-                    c = conn.cursor()
-                    for item in to_delete:
-                        r_to_del = item.split(" - ")[0]
-                        c.execute("DELETE FROM students WHERE roll_no=? AND course=? AND session=?", (r_to_del, sel_course, sel_session))
-                    conn.commit()
-                    st.warning("Archive cleaned. Reloading...")
-                    st.rerun()
-                
-                if st.button("🔥 Wipe Entire Class List"):
-                    conn.execute("DELETE FROM students WHERE course=? AND session=?", (sel_course, sel_session))
-                    conn.commit()
-                    st.rerun()
-            else: st.info("This course archive is currently clean (empty).")
+            if st.button("🗑️ Wipe Current Course List"):
+                conn.execute("DELETE FROM students WHERE course=? AND session=?", (sel_course, sel_session))
+                conn.commit(); st.rerun()
             conn.close()
 
-        # TAB 3: RUBRIC UPGRADES
         with tabs[2]:
-            st.subheader("Add or Modify Rubrics")
-            r_name = st.text_input("Rubric Title")
-            r_desc = st.text_area("Detail the 5-point scale criteria")
+            st.subheader("Rubric Management")
+            r_n = st.text_input("New Rubric Title")
+            r_d = st.text_area("Scoring Description")
             if st.button("Save Rubric"):
                 conn = sqlite3.connect('atab_memory.db')
-                conn.execute("INSERT INTO rubrics (name, description) VALUES (?,?)", (r_name, r_desc))
-                conn.commit(); conn.close()
-                st.success("Rubric added.")
+                conn.execute("INSERT INTO rubrics (name, description) VALUES (?,?)", (r_n, r_d))
+                conn.commit(); conn.close(); st.success("Saved.")
 
-        # TAB 4: CLASS ANALYTICS
         with tabs[3]:
-            st.subheader("Performance Visuals")
+            st.subheader("Consolidated Class Ledger")
             conn = sqlite3.connect('atab_memory.db')
+            # Strict isolation query
             query = """
-            SELECT e.*, s.name FROM evaluations e 
-            JOIN students s ON e.roll_no = s.roll_no AND e.course = s.course AND e.session = s.session
-            WHERE e.session=? AND e.course=?
-            """
-            df_ev = pd.read_sql_query(query, conn, params=(sel_session, sel_course))
-            if not df_ev.empty:
-                ranking = df_ev.groupby(['roll_no', 'name'])['score'].mean().sort_values(ascending=False)
-                st.table(ranking.head(5))
-                fig, ax = plt.subplots(figsize=(10, 4))
-                sns.heatmap(df_ev.pivot_table(index='name', columns='attribute', values='score'), annot=True, cmap="RdYlGn", ax=ax)
-                st.pyplot(fig)
-            else: st.info("No assessment data available.")
-            conn.close()
-
-        # TAB 5: EVALUATION HISTORY
-        with tabs[4]:
-            st.subheader("Complete Evaluation Ledger")
-            conn = sqlite3.connect('atab_memory.db')
-            ledger_query = """
             SELECT s.roll_no, s.name, e.attribute, e.score, e.feedback, e.timestamp 
             FROM students s 
             LEFT JOIN evaluations e ON s.roll_no = e.roll_no AND s.course = e.course AND s.session = e.session
             WHERE s.session=? AND s.course=?
+            ORDER BY s.roll_no ASC
             """
-            ledger_df = pd.read_sql_query(ledger_query, conn, params=(sel_session, sel_course))
-            st.dataframe(ledger_df, use_container_width=True)
+            master_df = pd.read_sql_query(query, conn, params=(sel_session, sel_course))
+            st.dataframe(master_df, use_container_width=True)
+            
+            # Analytics Heatmap
+            if not master_df.dropna(subset=['score']).empty:
+                st.markdown("---")
+                fig, ax = plt.subplots(figsize=(10, 4))
+                sns.heatmap(master_df.pivot_table(index='name', columns='attribute', values='score'), annot=True, cmap="RdYlGn", ax=ax)
+                st.pyplot(fig)
             conn.close()
 
     # --- STUDENT VIEW ---
     else:
         st.title("🎓 Student Portal")
-        s_roll = st.text_input("Login (Roll Number)")
-        if s_roll:
+        s_r = st.text_input("Roll Number Login")
+        if s_r:
             conn = sqlite3.connect('atab_memory.db')
-            s_data = conn.execute("SELECT name, session, course FROM students WHERE roll_no=?", (s_roll,)).fetchone()
+            user = conn.execute("SELECT name, session, course FROM students WHERE roll_no=?", (s_r,)).fetchone()
             conn.close()
-            
-            if s_data:
-                st.subheader(f"Welcome, {s_data[0]}!")
+            if user:
+                st.subheader(f"Welcome, {user[0]}")
                 if st.button("Generate Exam"):
                     if st.session_state['kb_files']:
                         ctx = "\n\n".join(st.session_state['kb_files'].values())
                         model = genai.GenerativeModel('gemini-1.5-flash')
                         p = f"Context: {ctx[:12000]}\nGenerate 3 MCQs, 2 Short Questions, 1 Essay."
-                        st.session_state['exam_text'] = model.generate_content(p).text
-                    else: st.error("No course materials found.")
+                        st.session_state['exam'] = model.generate_content(p).text
+                    else: st.error("Knowledge base empty.")
                 
-                if 'exam_text' in st.session_state:
-                    st.markdown(st.session_state['exam_text'])
-                    ans = st.text_area("Submit your answers below:", height=200)
-                    if st.button("Submit & Score"):
-                        with st.spinner("Analyzing..."):
-                            ctx = "\n\n".join(st.session_state['kb_files'].values())
-                            model = genai.GenerativeModel('gemini-1.5-flash')
-                            grade_p = f"Evaluate Technical Accuracy, English Proficiency, and Analytical Depth. Context: {ctx[:8000]}\nAns: {ans}\nFormat: ATTR: [Name] | SCORE: [1-5] | FEED: [Text]"
-                            res = model.generate_content(grade_p).text
-                            st.markdown(res)
-                            conn = sqlite3.connect('atab_memory.db')
-                            for line in res.split('\n'):
-                                if "ATTR:" in line:
-                                    parts = line.split('|')
-                                    at = parts[0].replace("ATTR:", "").strip()
-                                    sc = int(parts[1].replace("SCORE:", "").strip())
-                                    fd = parts[2].replace("FEED:", "").strip()
-                                    conn.execute("INSERT INTO evaluations (roll_no, session, course, attribute, score, feedback, timestamp) VALUES (?,?,?,?,?,?,?)",
-                                                 (s_roll, s_data[1], s_data[2], at, sc, fd, datetime.now()))
-                            conn.commit(); conn.close()
-                            st.success("Results recorded.")
-            else: st.warning("Roll number unrecognized.")
+                if 'exam' in st.session_state:
+                    st.markdown(st.session_state['exam'])
+                    ans = st.text_area("Your Answers:")
+                    if st.button("Submit for Grading"):
+                        model = genai.GenerativeModel('gemini-1.5-flash')
+                        g_p = f"Grading student: {ans}\nProvide 3 scores (1-5): Technical Accuracy, English, Depth.\nFormat: ATTR: [Name] | SCORE: [1-5] | FEED: [Text]"
+                        res = model.generate_content(g_p).text
+                        st.markdown(res)
+                        conn = sqlite3.connect('atab_memory.db')
+                        for line in res.split('\n'):
+                            if "ATTR:" in line:
+                                p = line.split('|')
+                                conn.execute("INSERT INTO evaluations (roll_no, session, course, attribute, score, feedback, timestamp) VALUES (?,?,?,?,?,?,?)",
+                                             (s_r, user[1], user[2], p[0].replace("ATTR:", "").strip(), int(p[1].replace("SCORE:", "").strip()), p[2].replace("FEED:", "").strip(), datetime.now()))
+                        conn.commit(); conn.close(); st.success("Saved.")
 
 if __name__ == "__main__":
     main()
