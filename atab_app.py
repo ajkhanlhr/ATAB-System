@@ -10,7 +10,7 @@ import plotly.express as px
 from datetime import datetime
 
 # --- UI CONFIG ---
-st.set_page_config(page_title="ATAB Visual Intelligence", page_icon="📈", layout="wide")
+st.set_page_config(page_title="ATAB Visual Pro", page_icon="🎓", layout="wide")
 
 # 1. BRAIN CONFIG
 api_key = st.secrets.get("GEMINI_API_KEY", "")
@@ -63,7 +63,7 @@ def main():
     if 'kb_files' not in st.session_state: st.session_state['kb_files'] = {}
 
     st.sidebar.title("🎓 ATAB Visual Pro")
-    app_mode = st.sidebar.selectbox("Access Mode", ["Instructor View", "Student View"])
+    app_mode = st.sidebar.selectbox("Access Mode", ["Student View", "Instructor View"])
     
     # Global Filters
     s_list = get_meta('session') + ["Add New"]
@@ -168,13 +168,15 @@ def main():
             if user:
                 st.subheader(f"Welcome back, {user[0]}!")
                 
-                # --- NEW INDIVIDUAL VISUAL FOR STUDENT ---
+                # --- INDIVIDUAL VISUAL FOR STUDENT ---
                 my_data = pd.read_sql_query("SELECT attribute, AVG(score) as score FROM evaluations WHERE roll_no=? GROUP BY attribute", conn, params=(s_r,))
-                if not my_data.empty:
+                if not my_data.empty and len(my_data) >= 3:
                     st.write("**My Learning Radar**")
                     fig_radar = px.line_polar(my_data, r='score', theta='attribute', line_close=True, range_r=[0,5])
                     fig_radar.update_traces(fill='toself')
                     st.plotly_chart(fig_radar, use_container_width=True)
+                elif not my_data.empty:
+                    st.info("Complete more evaluations to unlock your Learning Radar chart.")
                 
                 if st.button("Generate Exam"):
                     if st.session_state['kb_files']:
